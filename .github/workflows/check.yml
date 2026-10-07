@@ -1,0 +1,80 @@
+name: VPN Gate Node Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每 30 分钟自动检测一次（原仓库版本缺少此段，导致只能手动运行）
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: gate-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
+        run: python vpngate.py
+        env:
+          # 自建检测 Worker（本账号独立部署，不指向任何第三方服务器）
+          CHECK_WORKER: "https://check.aibici.cc.cd/check?sstp=vpn:vpn@"
+          CHECK_CONCURRENCY: "32"
+          CHECK_TIMEOUT: "90"
+          # 生成页面的公开地址；nodes.txt 供 edgetunnel 后台「自定义优选IP」使用
+          NODES_URL: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/nodes.txt"
+
+      - name: Ensure GitHub Pages is enabled (one-time auto setup)
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
+          echo "Pages API status: $code"
+          if [ "$code" = "404" ]; then
+            # build_type=workflow 走 artifact 部署(配合下方 deploy-pages),
+            # 不能与 source.branches/source.path 同时出现, 否则 API 报 422。
+            echo "首次运行: 启用 GitHub Pages (build_type = workflow)"
+            curl -sS -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/json" \
+              -d '{"build_type":"workflow"}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
+            echo
+            sleep 15
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'public'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Show site URL
+        run: 'echo "site: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ (deploy outcome: ${{ steps.deployment.outcome }})"'
